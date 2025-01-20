@@ -3,16 +3,17 @@ import argparse
 import json
 from pathlib import Path
 import re
+import os
 
 from collections import defaultdict
 
-_PID_TO_DEVICE = None
+_PID_TO_DEVICE = {}
 
 # Code adapted from https://github.com/ezyang/nvprof2json
 
 def parse_args():
     parser = argparse.ArgumentParser(description='Convert nsight systems sqlite output to Google Event Trace compatible JSON.')
-    parser.add_argument("-f", '--filename', help="Path to the input sqlite file.", required=True)
+    parser.add_argument("-f", '--filenames', help="Path to the input sqlite file(s).", required=True, nargs="+")
     parser.add_argument("-o", "--output", help="Output file name, default to same as input with .json extension.")
     parser.add_argument("-t", "--activity-type", help="Type of activities shown. Default to all.", default=["kernel", "nvtx-kernel"], choices=['kernel', 'nvtx', "nvtx-kernel", "cuda-api"], nargs="+")
     parser.add_argument("--nvtx-event-prefix", help="Filter NVTX events by their names' prefix.", type=str, nargs="*")
@@ -22,9 +23,11 @@ def parse_args():
                                                     E.g. {"send": "thread_state_iowait", "recv": "thread_state_iowait", "compute": "thread_state_running"}
                                                     For details of the color scheme, see links in https://github.com/google/perfetto/issues/208
                                                     """, type=json.loads, default={})
+    parser.add_argument("--align-traces", help="The event name based on which to align traces if multiple sqlite files are supplied. "
+                                                "The event should be present in all files and occur at the same time.", type=str)
     args = parser.parse_args()
     if args.output is None:
-        args.output = Path(args.filename).with_suffix(".json")
+        args.output = Path(args.filenames[0]).with_suffix(".json")
     return args
 
 class ActivityType:
@@ -41,7 +44,7 @@ def munge_time(t):
 # For reference of the schema, see
 # https://docs.nvidia.com/nsight-systems/UserGuide/index.html#exporter-sqlite-schema
 
-def parse_cupti_kernel_events(conn: sqlite3.Connection, strings: dict):
+def parse_cupti_kernel_events(conn: sqlite3.Connection, strings: dict, filename=""):
     """
     Copied from the docs:
     CUPTI_ACTIVITY_KIND_KERNEL
@@ -84,7 +87,7 @@ def parse_cupti_kernel_events(conn: sqlite3.Connection, strings: dict):
                 "ts": munge_time(row["start"]),
                 "dur": munge_time(row["end"] - row["start"]),
                 "tid": "Stream {}".format(row["streamId"]),
-                "pid": "Device {}".format(row["deviceId"]),
+                "pid": "{} Device {}".format(filename, row["deviceId"]),
                 "args": {
                     # TODO: More
                     },
@@ -92,19 +95,19 @@ def parse_cupti_kernel_events(conn: sqlite3.Connection, strings: dict):
         per_device_kernel_events[row["deviceId"]].append(event)
     return per_device_kernel_rows, per_device_kernel_events
 
-def link_pid_with_devices(conn: sqlite3.Connection):
+def link_pid_with_devices(conn: sqlite3.Connection, filename=""):
     # map each pid to a device. assumes each pid is associated with a single device
     global _PID_TO_DEVICE
-    if _PID_TO_DEVICE is None:
+    if filename not in _PID_TO_DEVICE:
         pid_to_device = {}
         for row in conn.execute("SELECT DISTINCT deviceId, globalPid / 0x1000000 % 0x1000000 AS PID FROM CUPTI_ACTIVITY_KIND_KERNEL"):
             assert row["PID"] not in pid_to_device, \
                 f"A single PID ({row['PID']}) is associated with multiple devices ({pid_to_device[row['PID']]} and {row['deviceId']})."
             pid_to_device[row["PID"]] = row["deviceId"]
-        _PID_TO_DEVICE = pid_to_device
-    return _PID_TO_DEVICE
+        _PID_TO_DEVICE[filename] = pid_to_device
+    return _PID_TO_DEVICE[filename]
 
-def parse_nvtx_events(conn: sqlite3.Connection, event_prefix=None, color_scheme={}):
+def parse_nvtx_events(conn: sqlite3.Connection, event_prefix=None, color_scheme={}, filename=""):
     """
     Copied from the docs:
     NVTX_EVENTS
@@ -170,7 +173,7 @@ def parse_nvtx_events(conn: sqlite3.Connection, event_prefix=None, color_scheme=
                 "ts": munge_time(row["start"]),
                 "dur": munge_time(row["end"] - row["start"]),
                 "tid": "NVTX Thread {}".format(tid),
-                "pid": "Device {}".format(pid_to_device[pid]),
+                "pid": "{} Device {}".format(filename, pid_to_device[pid]),
                 "args": {
                     # TODO: More
                     },
@@ -183,7 +186,7 @@ def parse_nvtx_events(conn: sqlite3.Connection, event_prefix=None, color_scheme=
         per_device_nvtx_events[pid_to_device[pid]].append(event)
     return per_device_nvtx_rows, per_device_nvtx_events
 
-def parse_cuda_api_events(conn: sqlite3.Connection, strings: dict):
+def parse_cuda_api_events(conn: sqlite3.Connection, strings: dict, filename=""):
     """
     Copied from the docs:
     CUPTI_ACTIVITY_KIND_RUNTIME
@@ -213,7 +216,7 @@ def parse_cuda_api_events(conn: sqlite3.Connection, strings: dict):
                 "ts": munge_time(row["start"]),
                 "dur": munge_time(row["end"] - row["start"]),
                 "tid": "CUDA API Thread {}".format(tid),
-                "pid": "Device {}".format(pid_to_devices[pid]),
+                "pid": "{} Device {}".format(filename, pid_to_devices[pid]),
                 "args": {
                         "correlationId": correlationId,
                     },
@@ -290,15 +293,15 @@ def link_nvtx_events_to_kernel_events(strings: dict,
                 result[nvtx_row] = (kernel_start_time, kernel_end_time)
     return result
 
-def parse_all_events(conn: sqlite3.Connection, strings: dict, activities=None, event_prefix=None, color_scheme={}):
+def parse_all_events(conn: sqlite3.Connection, strings: dict, activities=None, event_prefix=None, color_scheme={}, filename=""):
     if activities is None:
         activities = [ActivityType.KERNEL, ActivityType.NVTX_CPU, ActivityType.NVTX_KERNEL]
     if ActivityType.KERNEL in activities or ActivityType.NVTX_KERNEL in activities:
-        per_device_kernel_rows, per_device_kernel_events = parse_cupti_kernel_events(conn, strings)
+        per_device_kernel_rows, per_device_kernel_events = parse_cupti_kernel_events(conn, strings, filename=filename)
     if ActivityType.NVTX_CPU in activities or ActivityType.NVTX_KERNEL in activities:
-        per_device_nvtx_rows, per_device_nvtx_events = parse_nvtx_events(conn, event_prefix=event_prefix, color_scheme=color_scheme)
+        per_device_nvtx_rows, per_device_nvtx_events = parse_nvtx_events(conn, event_prefix=event_prefix, color_scheme=color_scheme, filename=filename)
     if ActivityType.CUDA_API in activities or ActivityType.NVTX_KERNEL in activities:
-        per_device_cuda_api_rows, per_device_cuda_api_events = parse_cuda_api_events(conn, strings)
+        per_device_cuda_api_rows, per_device_cuda_api_events = parse_cuda_api_events(conn, strings, filename=filename)
     if ActivityType.NVTX_KERNEL in activities:
         pid_to_device = link_pid_with_devices(conn)
         nvtx_kernel_event_map = link_nvtx_events_to_kernel_events(strings, pid_to_device, per_device_nvtx_rows, per_device_cuda_api_rows, per_device_kernel_rows, per_device_kernel_events)
@@ -321,7 +324,7 @@ def parse_all_events(conn: sqlite3.Connection, strings: dict, activities=None, e
                 "ts": munge_time(kernel_start_time),
                 "dur": munge_time(kernel_end_time - kernel_start_time),
                 "tid": "NVTX Kernel Thread {}".format(nvtx_event["tid"]),
-                "pid": "Device {}".format(pid_to_device[nvtx_event["pid"]]),
+                "pid": "{} Device {}".format(filename, pid_to_device[nvtx_event["pid"]]),
                 "args": {
                     # TODO: More
                     },
@@ -329,18 +332,66 @@ def parse_all_events(conn: sqlite3.Connection, strings: dict, activities=None, e
             traceEvents.append(event)
     return traceEvents
 
+def align_traces(trace_events, based_on_event: str):
+    # first separate out traces from different pids
+    per_pid_traces = defaultdict(list)
+    base_events_per_pid = defaultdict(list)
+    for event in trace_events:
+        pid = event["pid"]
+        per_pid_traces[pid].append(event)
+        if event["name"] == based_on_event:
+            base_events_per_pid[pid].append(event)
+    # now derive a time shift factor
+    ref_pid = sorted(per_pid_traces.keys())[0]
+    ref_events = base_events_per_pid[ref_pid]
+    relative_time_shifts = defaultdict(list)
+    for pid, base_events in base_events_per_pid.items():
+        if pid == ref_pid:
+            continue
+        assert len(base_events) == len(ref_events), f"Number of base events ({len(base_events)}) does not match number of ref events ({len(ref_events)}) for pid {pid}"
+        for i in range(len(base_events)):
+            relative_time_shifts[pid].append(ref_events[i]["ts"] - base_events[i]["ts"])
+            relative_time_shifts[pid].append((ref_events[i]["ts"] + ref_events[i]["dur"]) - (base_events[i]["ts"] + base_events[i]["dur"]))
+    mean_time_shifts = {
+        pid: sum(shifts) / len(shifts) for pid, shifts in relative_time_shifts.items()
+    }
+    # now apply the time shift factor
+    for pid, events in per_pid_traces.items():
+        if pid == ref_pid:
+            continue
+        for event in events:
+            event["ts"] += mean_time_shifts[pid]
+    # create new trace events
+    new_trace_events = []
+    for pid, events in per_pid_traces.items():
+        new_trace_events.extend(events)
+    new_trace_events.sort(key=lambda x: (x["pid"], x["tid"]))
+    return new_trace_events
+
+
 def nsys2json():
     args = parse_args()
-    conn = sqlite3.connect(args.filename)
-    conn.row_factory = sqlite3.Row
 
-    strings = {}
-    for r in conn.execute("SELECT id, value FROM StringIds"):
-        strings[r["id"]] = r["value"]
+    traceEvents = []
+    for filename in args.filenames:
+        conn = sqlite3.connect(filename)
+        conn.row_factory = sqlite3.Row
 
-    traceEvents = parse_all_events(conn, strings, activities=args.activity_type, event_prefix=args.nvtx_event_prefix, color_scheme=args.nvtx_color_scheme)
+        filename_base = os.path.splitext(os.path.basename(filename))[0]
+
+        strings = {}
+        for r in conn.execute("SELECT id, value FROM StringIds"):
+            strings[r["id"]] = r["value"]
+
+        events = parse_all_events(conn, strings, activities=args.activity_type, event_prefix=args.nvtx_event_prefix, color_scheme=args.nvtx_color_scheme, filename=filename_base)
+        traceEvents.extend(events)
+        conn.close()
+
     # make the timelines appear in pid and tid order
     traceEvents.sort(key=lambda x: (x["pid"], x["tid"]))
+
+    if len(args.filenames) > 1 and args.align_traces:
+        traceEvents = align_traces(traceEvents, args.align_traces)
 
     with open(args.output, 'w') as f:
         json.dump(traceEvents, f)
