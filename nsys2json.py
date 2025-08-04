@@ -14,7 +14,7 @@ def parse_args():
     parser = argparse.ArgumentParser(description='Convert nsight systems sqlite output to Google Event Trace compatible JSON.')
     parser.add_argument("-f", '--filename', help="Path to the input sqlite file.", required=True)
     parser.add_argument("-o", "--output", help="Output file name, default to same as input with .json extension.")
-    parser.add_argument("-t", "--activity-type", help="Type of activities shown. Default to all.", default=["kernel", "nvtx-kernel"], choices=['kernel', 'nvtx', "nvtx-kernel", "cuda-api"], nargs="+")
+    parser.add_argument("-t", "--activity-type", help="Type of activities shown. Default to all.", default=None, choices=['kernel', 'nvtx', "nvtx-kernel", "cuda-api"], nargs="+")
     parser.add_argument("--nvtx-event-prefix", help="Filter NVTX events by their names' prefix.", type=str, nargs="*")
     parser.add_argument("--nvtx-color-scheme", help="""Color scheme for NVTX events.
                                                     Accepts a dict mapping a string to one of chrome tracing colors.
@@ -83,7 +83,7 @@ def parse_cupti_kernel_events(conn: sqlite3.Connection, strings: dict):
                 "cat": "cuda",
                 "ts": munge_time(row["start"]),
                 "dur": munge_time(row["end"] - row["start"]),
-                "tid": "Stream {}".format(row["streamId"]),
+                "tid": "CUDA API {}".format(row["streamId"]),
                 "pid": "Device {}".format(row["deviceId"]),
                 "args": {
                     # TODO: More
@@ -169,8 +169,8 @@ def parse_nvtx_events(conn: sqlite3.Connection, strings: dict, event_prefix=None
                 "cat": "nvtx",
                 "ts": munge_time(row["start"]),
                 "dur": munge_time(row["end"] - row["start"]),
-                "tid": "NVTX Thread {}".format(tid),
-                "pid": "Device {}".format(pid_to_device[pid]),
+                "tid": "NVTX {}".format(tid),
+                "pid": "Host {}".format(pid_to_device[pid]),
                 "args": {
                     # TODO: More
                     },
@@ -212,8 +212,8 @@ def parse_cuda_api_events(conn: sqlite3.Connection, strings: dict):
                 "cat": "cuda_api",
                 "ts": munge_time(row["start"]),
                 "dur": munge_time(row["end"] - row["start"]),
-                "tid": "CUDA API Thread {}".format(tid),
-                "pid": "Device {}".format(pid_to_devices[pid]),
+                "tid": "CUDA API {}".format(tid),
+                "pid": "Host {}".format(pid_to_devices[pid]),
                 "args": {
                         "correlationId": correlationId,
                     },
@@ -292,7 +292,7 @@ def link_nvtx_events_to_kernel_events(strings: dict,
 
 def parse_all_events(conn: sqlite3.Connection, strings: dict, activities=None, event_prefix=None, color_scheme={}):
     if activities is None:
-        activities = [ActivityType.KERNEL, ActivityType.NVTX_CPU, ActivityType.NVTX_KERNEL]
+        activities = [ActivityType.KERNEL, ActivityType.NVTX_CPU, ActivityType.NVTX_KERNEL, ActivityType.CUDA_API]
     if ActivityType.KERNEL in activities or ActivityType.NVTX_KERNEL in activities:
         per_device_kernel_rows, per_device_kernel_events = parse_cupti_kernel_events(conn, strings)
     if ActivityType.NVTX_CPU in activities or ActivityType.NVTX_KERNEL in activities:
@@ -320,7 +320,7 @@ def parse_all_events(conn: sqlite3.Connection, strings: dict, activities=None, e
                 "cat": "nvtx-kernel",
                 "ts": munge_time(kernel_start_time),
                 "dur": munge_time(kernel_end_time - kernel_start_time),
-                "tid": "NVTX Kernel Thread {}".format(nvtx_event["tid"]),
+                "tid": "NVTX {}".format(nvtx_event["tid"]),
                 "pid": "Device {}".format(pid_to_device[nvtx_event["pid"]]),
                 "args": {
                     # TODO: More
