@@ -164,7 +164,7 @@ def parse_nvtx_events(conn: sqlite3.Connection, strings: dict, event_prefix=None
         per_device_nvtx_rows[pid_to_device[pid]].append(row)
         assert pid in pid_to_device, f"PID {pid} not found in the pid to device map."
         event = {
-                "name": text,
+                "name": name,
                 "ph": "X", # Complete Event (Begin + End event)
                 "cat": "nvtx",
                 "ts": munge_time(row["start"]),
