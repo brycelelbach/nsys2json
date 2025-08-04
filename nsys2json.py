@@ -177,7 +177,7 @@ def parse_nvtx_events(conn: sqlite3.Connection, strings: dict, event_prefix=None
                 }
         if color_scheme:
             for key, color in color_scheme.items():
-                if re.search(key, text):
+                if re.search(key, name):
                     event["cname"] = color
                     break
         per_device_nvtx_events[pid_to_device[pid]].append(event)
@@ -315,7 +315,7 @@ def parse_all_events(conn: sqlite3.Connection, strings: dict, activities=None, e
     if ActivityType.NVTX_KERNEL in activities:
         for nvtx_event, (kernel_start_time, kernel_end_time) in nvtx_kernel_event_map.items():
             event = {
-                "name": nvtx_event["text"] or "",
+                "name": strings.get(nvtx_event["textId"], nvtx_event["text"] or ""),
                 "ph": "X", # Complete Event (Begin + End event)
                 "cat": "nvtx-kernel",
                 "ts": munge_time(kernel_start_time),
