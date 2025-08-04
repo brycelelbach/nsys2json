@@ -296,7 +296,7 @@ def parse_all_events(conn: sqlite3.Connection, strings: dict, activities=None, e
     if ActivityType.KERNEL in activities or ActivityType.NVTX_KERNEL in activities:
         per_device_kernel_rows, per_device_kernel_events = parse_cupti_kernel_events(conn, strings)
     if ActivityType.NVTX_CPU in activities or ActivityType.NVTX_KERNEL in activities:
-        per_device_nvtx_rows, per_device_nvtx_events = parse_nvtx_events(conn, event_prefix=event_prefix, color_scheme=color_scheme)
+        per_device_nvtx_rows, per_device_nvtx_events = parse_nvtx_events(conn, strings, event_prefix=event_prefix, color_scheme=color_scheme)
     if ActivityType.CUDA_API in activities or ActivityType.NVTX_KERNEL in activities:
         per_device_cuda_api_rows, per_device_cuda_api_events = parse_cuda_api_events(conn, strings)
     if ActivityType.NVTX_KERNEL in activities:
