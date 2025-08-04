@@ -104,7 +104,7 @@ def link_pid_with_devices(conn: sqlite3.Connection):
         _PID_TO_DEVICE = pid_to_device
     return _PID_TO_DEVICE
 
-def parse_nvtx_events(conn: sqlite3.Connection, event_prefix=None, color_scheme={}):
+def parse_nvtx_events(conn: sqlite3.Connection, strings: dict, event_prefix=None, color_scheme={}):
     """
     Copied from the docs:
     NVTX_EVENTS
@@ -157,8 +157,8 @@ def parse_nvtx_events(conn: sqlite3.Connection, event_prefix=None, color_scheme=
     per_device_nvtx_events = defaultdict(list)
     pid_to_device = link_pid_with_devices(conn)
     # eventType 59 is NvtxPushPopRange, which corresponds to torch.cuda.nvtx.range apis
-    for row in conn.execute(f"SELECT start, end, text, globalTid / 0x1000000 % 0x1000000 AS PID, globalTid % 0x1000000 AS TID FROM NVTX_EVENTS WHERE NVTX_EVENTS.eventType == 59{match_text};"):
-        text = row['text']
+    for row in conn.execute(f"SELECT start, end, text, textID, globalTid / 0x1000000 % 0x1000000 AS PID, globalTid % 0x1000000 AS TID FROM NVTX_EVENTS WHERE NVTX_EVENTS.eventType == 59{match_text};"):
+        name = strings[row["textId"]]
         pid = row['PID']
         tid = row['TID']
         per_device_nvtx_rows[pid_to_device[pid]].append(row)
